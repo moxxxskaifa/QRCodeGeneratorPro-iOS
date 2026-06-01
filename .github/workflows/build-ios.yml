@@ -1,0 +1,52 @@
+name: Build QRCodeGeneratorPro iOS
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+      - name: Build Compose Framework
+        run: ./gradlew :composeApp:assembleXCFramework
+      - name: Install xcodegen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Install Apple Certificate
+        env:
+          CERT_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          CERT_PASS: ${{ secrets.P12_PASSWORD }}
+          PROVISION_BASE64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          echo "$CERT_BASE64" | base64 --decode > /tmp/cert.p12
+          echo "$PROVISION_BASE64" | base64 --decode > /tmp/pp.mobileprovision
+          security create-keychain -p temp ${{ runner.temp }}/build.keychain
+          security default-keychain -s ${{ runner.temp }}/build.keychain
+          security unlock-keychain -p temp ${{ runner.temp }}/build.keychain
+          security import /tmp/cert.p12 -P "$CERT_PASS" -A -k ${{ runner.temp }}/build.keychain
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp /tmp/pp.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
+      - name: Build IPA
+        run: |
+          xcodebuild -project QRCodeGeneratorPro.xcodeproj -scheme iosApp \
+            -configuration Release -archivePath /tmp/app.xcarchive \
+            -allowProvisioningUpdates archive
+          xcodebuild -exportArchive -archivePath /tmp/app.xcarchive \
+            -exportPath /tmp/ipa -exportOptionsPlist exportOptions.plist \
+            -allowProvisioningUpdates
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: QRCodeGeneratorPro-iOS-${{ github.sha }}
+          path: /tmp/ipa/*.ipa
