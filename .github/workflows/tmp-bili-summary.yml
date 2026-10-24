@@ -1,0 +1,99 @@
+name: Temporary Bilibili Summary
+
+on:
+  push:
+    branches: [tmp-bili-summary-20261024]
+
+jobs:
+  transcribe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests faster-whisper yt-dlp
+      - name: Process videos
+        run: |
+          mkdir -p bili_results
+          python - <<'PY'
+          import os, json, requests, subprocess
+          from pathlib import Path
+          from faster_whisper import WhisperModel
+
+          bvids = ["BV1HbJR66Egi", "BV1kTtE6tEtJ"]
+          out = Path("bili_results")
+          headers = {"User-Agent":"Mozilla/5.0", "Referer":"https://www.bilibili.com/"}
+          session = requests.Session(); session.headers.update(headers)
+
+          model = None
+          for bvid in bvids:
+              print("=====", bvid, "=====")
+              meta_url = "https://api.bilibili.com/x/web-interface/view"
+              r = session.get(meta_url, params={"bvid":bvid}, timeout=30)
+              print("meta status", r.status_code)
+              data = r.json()
+              if data.get("code") != 0:
+                  print(data)
+                  continue
+              meta = data["data"]
+              (out/f"{bvid}_metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+              print("TITLE:", meta.get("title"))
+              print("OWNER:", (meta.get("owner") or {}).get("name"))
+              print("DURATION:", meta.get("duration"))
+              print("DESC:", meta.get("desc"))
+
+              cid = (meta.get("pages") or [{}])[0].get("cid") or meta.get("cid")
+              got_sub = False
+              if cid:
+                  try:
+                      pr = session.get("https://api.bilibili.com/x/player/v2", params={"bvid":bvid,"cid":cid}, timeout=30)
+                      pj = pr.json()
+                      subs = (((pj.get("data") or {}).get("subtitle") or {}).get("subtitles") or [])
+                      for s in subs:
+                          u = s.get("subtitle_url") or s.get("url")
+                          if not u: continue
+                          if u.startswith("//"): u = "https:" + u
+                          sj = session.get(u, timeout=30).json()
+                          body = sj.get("body") or []
+                          if body:
+                              lines = [f"[{x.get('from',0):.2f}-{x.get('to',0):.2f}] {x.get('content','').strip()}" for x in body if x.get('content')]
+                              (out/f"{bvid}_transcript.txt").write_text("\n".join(lines), encoding="utf-8")
+                              print("SUBTITLE OK", len(lines))
+                              got_sub = True
+                              break
+                  except Exception as e:
+                      print("subtitle failed", repr(e))
+
+              if not got_sub:
+                  media = out/f"{bvid}.m4a"
+                  cmd = ["yt-dlp", "-f", "bestaudio/best", "--no-playlist", "-o", str(media), f"https://www.bilibili.com/video/{bvid}/"]
+                  print("RUN", " ".join(cmd))
+                  p = subprocess.run(cmd, text=True, capture_output=True)
+                  print(p.stdout)
+                  print(p.stderr)
+                  if media.exists() and media.stat().st_size > 10000:
+                      if model is None:
+                          model = WhisperModel("small", device="cpu", compute_type="int8")
+                      segments, info = model.transcribe(str(media), language="zh", vad_filter=True)
+                      lines=[]
+                      for seg in segments:
+                          t=seg.text.strip()
+                          if t:
+                              lines.append(f"[{seg.start:.2f}-{seg.end:.2f}] {t}")
+                      (out/f"{bvid}_transcript.txt").write_text("\n".join(lines), encoding="utf-8")
+                      print("ASR OK", len(lines))
+                      media.unlink()
+
+          print("RESULT FILES")
+          for p in sorted(out.iterdir()):
+              print(p.name, p.stat().st_size)
+          PY
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bili-results
+          path: bili_results/
+          if-no-files-found: warn
