@@ -1,8 +1,8 @@
 name: Temporary Bilibili Summary
 
 on:
-  push:
-    branches: [tmp-bili-summary-20261024]
+  pull_request:
+    branches: [main]
 
 jobs:
   transcribe:
@@ -30,8 +30,7 @@ jobs:
           model = None
           for bvid in bvids:
               print("=====", bvid, "=====")
-              meta_url = "https://api.bilibili.com/x/web-interface/view"
-              r = session.get(meta_url, params={"bvid":bvid}, timeout=30)
+              r = session.get("https://api.bilibili.com/x/web-interface/view", params={"bvid":bvid}, timeout=30)
               print("meta status", r.status_code)
               data = r.json()
               if data.get("code") != 0:
